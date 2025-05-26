@@ -1,35 +1,37 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Plus, X, Moon, Sun, Copy, Trash2, Settings } from 'lucide-react';
+import { Send, Plus, X, Moon, Sun, Copy, Trash2, Settings, Key, AlertCircle } from 'lucide-react';
+import APIService from './services/apiService';
+import APIKeysModal from './components/APIKeysModal';
 
 const LLM_PROVIDERS = {
   openai: {
     name: 'OpenAI',
-    models: ['gpt-4', 'gpt-4-turbo', 'gpt-3.5-turbo'],
+    models: ['gpt-4o', 'gpt-4-turbo', 'gpt-3.5-turbo'],
     color: 'bg-green-500'
   },
   anthropic: {
     name: 'Anthropic',
-    models: ['claude-3-opus', 'claude-3-sonnet', 'claude-3-haiku'],
-    color: 'bg-orange-500'
+    models: ['claude-3-opus-20240229', 'claude-3-sonnet-20240229', 'claude-3-haiku-20240307'],
+    color: 'bg-yellow-500'
   },
   google: {
     name: 'Google',
-    models: ['gemini-pro', 'gemini-pro-vision', 'palm-2'],
+    models: ['gemini-1.5-pro-latest', 'gemini-1.5-flash-latest', 'gemini-pro-vision'],
     color: 'bg-blue-500'
-  },
-  grok: {
-    name: 'Grok',
-    models: ['grok-1', 'grok-1.5'],
-    color: 'bg-purple-500'
   },
   mistral: {
     name: 'Mistral',
-    models: ['mistral-large', 'mistral-medium', 'mistral-small'],
-    color: 'bg-red-500'
+    models: ['mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'open-mistral-nemo', 'codestral-latest'],
+    color: 'bg-purple-500'
   },
   cohere: {
     name: 'Cohere',
-    models: ['command', 'command-light'],
+    models: ['command-a-03-2025', 'command-r-plus', 'command-r', 'embed-v4.0', 'rerank-v3.5'],
+    color: 'bg-pink-500'
+  },
+  groq: {
+    name: 'Groq',
+    models: ['grok-3', 'grok-3-mini', 'llama3-8b-8192', 'llama3-70b-8192', 'mixtral-8x7b-32768', 'gemma-7b-it'],
     color: 'bg-indigo-500'
   }
 };
@@ -48,16 +50,33 @@ const MultiLLMChat = () => {
     {
       id: 2,
       provider: 'anthropic',
-      model: 'claude-3-sonnet',
+      model: 'claude-3-sonnet-20240229',
       messages: [],
       isLoading: false,
       systemPrompt: ''
     }
   ]);
   const [globalMessage, setGlobalMessage] = useState('');
-  const [sendMode, setSendMode] = useState('individual'); // 'individual' or 'broadcast'
+  const [sendMode, setSendMode] = useState('individual');
   const [nextId, setNextId] = useState(3);
+  const [apiKeys, setApiKeys] = useState({});
+  const [showApiKeysModal, setShowApiKeysModal] = useState(false);
+  const [apiService, setApiService] = useState(null);
   const messagesEndRef = useRef({});
+
+  // Load API keys from localStorage on component mount
+  useEffect(() => {
+    const savedKeys = localStorage.getItem('llm-api-keys');
+    if (savedKeys) {
+      try {
+        const keys = JSON.parse(savedKeys);
+        setApiKeys(keys);
+        setApiService(new APIService(keys));
+      } catch (error) {
+        console.error('Error loading API keys:', error);
+      }
+    }
+  }, []);
 
   const scrollToBottom = (chatbotId) => {
     messagesEndRef.current[chatbotId]?.scrollIntoView({ behavior: 'smooth' });
@@ -96,21 +115,10 @@ const MultiLLMChat = () => {
     ));
   };
 
-  const simulateAPICall = async (message, provider, model) => {
-    // Simulate API delay
-    await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 2000));
-    
-    // Mock responses based on provider
-    const responses = {
-      openai: `OpenAI ${model} response: I understand you're asking about "${message}". As an AI assistant, I can help you with various tasks including analysis, creative writing, and problem-solving.`,
-      anthropic: `Claude ${model} here! Regarding "${message}" - I'm designed to be helpful, harmless, and honest. I can assist with research, writing, coding, and thoughtful conversation.`,
-      google: `Google ${model} response: Thank you for your question about "${message}". I can provide information, analysis, and creative assistance across many domains.`,
-      grok: `Grok ${model} here with some wit: About "${message}" - I'm designed to be both helpful and entertaining, with a touch of humor and rebellion.`,
-      mistral: `Mistral ${model} response: Concerning "${message}" - I'm a powerful language model focused on providing accurate and helpful responses.`,
-      cohere: `Cohere ${model} here: Your query "${message}" is interesting. I specialize in understanding and generating human-like text.`
-    };
-    
-    return responses[provider] || `${provider} ${model}: Response to "${message}"`;
+  const saveApiKeys = (keys) => {
+    setApiKeys(keys);
+    setApiService(new APIService(keys));
+    localStorage.setItem('llm-api-keys', JSON.stringify(keys));
   };
 
   const sendMessage = async (chatbotId, message) => {
@@ -119,7 +127,21 @@ const MultiLLMChat = () => {
     const chatbot = chatbots.find(bot => bot.id === chatbotId);
     if (!chatbot) return;
 
-    // Add user message
+    // Check if API key is available for this provider
+    if (!apiKeys[chatbot.provider]) {
+      const errorMessage = { 
+        role: 'assistant', 
+        content: `API key for ${LLM_PROVIDERS[chatbot.provider].name} is not configured. Please add your API key in the settings.`, 
+        timestamp: new Date() 
+      };
+      const userMessage = { role: 'user', content: message, timestamp: new Date() };
+      updateChatbot(chatbotId, {
+        messages: [...chatbot.messages, userMessage, errorMessage]
+      });
+      return;
+    }
+
+    // Add user message and set loading state
     const userMessage = { role: 'user', content: message, timestamp: new Date() };
     updateChatbot(chatbotId, {
       messages: [...chatbot.messages, userMessage],
@@ -127,15 +149,32 @@ const MultiLLMChat = () => {
     });
 
     try {
-      const response = await simulateAPICall(message, chatbot.provider, chatbot.model);
-      const assistantMessage = { role: 'assistant', content: response, timestamp: new Date() };
+      // Call the actual API
+      const response = await apiService.callLLM(
+        [...chatbot.messages, userMessage],
+        chatbot.provider,
+        chatbot.model,
+        chatbot.systemPrompt
+      );
+
+      const assistantMessage = { 
+        role: 'assistant', 
+        content: response, 
+        timestamp: new Date() 
+      };
       
       updateChatbot(chatbotId, {
         messages: [...chatbot.messages, userMessage, assistantMessage],
         isLoading: false
       });
     } catch (error) {
-      const errorMessage = { role: 'assistant', content: 'Sorry, there was an error processing your request.', timestamp: new Date() };
+      console.error('API Error:', error);
+      const errorMessage = { 
+        role: 'assistant', 
+        content: `Error: ${error.message}. Please check your API key and try again.`, 
+        timestamp: new Date() 
+      };
+      
       updateChatbot(chatbotId, {
         messages: [...chatbot.messages, userMessage, errorMessage],
         isLoading: false
@@ -171,6 +210,8 @@ const MultiLLMChat = () => {
     return 'grid-cols-1 md:grid-cols-2 lg:grid-cols-4';
   };
 
+  const hasAnyApiKeys = Object.values(apiKeys).some(key => key && key.trim() !== '');
+
   return (
     <div className={`min-h-screen transition-colors duration-200 ${darkMode ? 'dark bg-gray-900' : 'bg-gray-50'}`}>
       {/* Header */}
@@ -182,6 +223,29 @@ const MultiLLMChat = () => {
             </h1>
             
             <div className="flex items-center space-x-4">
+              {/* API Keys Status */}
+              {!hasAnyApiKeys && (
+                <div className="flex items-center space-x-2 px-3 py-1 bg-yellow-100 dark:bg-yellow-900 text-yellow-800 dark:text-yellow-200 rounded-lg text-sm">
+                  <AlertCircle size={16} />
+                  <span>Configure API keys to start chatting</span>
+                </div>
+              )}
+
+              {/* API Keys Button */}
+              <button
+                onClick={() => setShowApiKeysModal(true)}
+                className={`flex items-center space-x-2 px-4 py-2 rounded-lg font-medium transition-colors ${
+                  hasAnyApiKeys
+                    ? darkMode 
+                      ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' 
+                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                    : 'bg-yellow-500 hover:bg-yellow-600 text-white'
+                }`}
+              >
+                <Key size={18} />
+                <span>API Keys</span>
+              </button>
+
               {/* Send Mode Toggle */}
               <div className="flex items-center space-x-2">
                 <span className={`text-sm ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>Send Mode:</span>
@@ -253,6 +317,7 @@ const MultiLLMChat = () => {
               chatbot={chatbot}
               darkMode={darkMode}
               sendMode={sendMode}
+              hasApiKey={!!apiKeys[chatbot.provider]}
               onUpdate={(updates) => updateChatbot(chatbot.id, updates)}
               onRemove={() => removeChatbot(chatbot.id)}
               onSendMessage={(message) => sendMessage(chatbot.id, message)}
@@ -264,6 +329,15 @@ const MultiLLMChat = () => {
           ))}
         </div>
       </div>
+
+      {/* API Keys Modal */}
+      <APIKeysModal
+        isOpen={showApiKeysModal}
+        onClose={() => setShowApiKeysModal(false)}
+        apiKeys={apiKeys}
+        onSaveKeys={saveApiKeys}
+        darkMode={darkMode}
+      />
     </div>
   );
 };
@@ -272,6 +346,7 @@ const ChatbotCard = ({
   chatbot, 
   darkMode, 
   sendMode,
+  hasApiKey,
   onUpdate, 
   onRemove, 
   onSendMessage, 
@@ -294,7 +369,7 @@ const ChatbotCard = ({
       {/* Header */}
       <div className={`flex items-center justify-between p-4 border-b ${darkMode ? 'border-gray-700' : 'border-gray-200'}`}>
         <div className="flex items-center space-x-3">
-          <div className={`w-3 h-3 rounded-full ${LLM_PROVIDERS[chatbot.provider]?.color || 'bg-gray-400'}`}></div>
+          <div className={`w-3 h-3 rounded-full ${LLM_PROVIDERS[chatbot.provider]?.color || 'bg-gray-400'} ${!hasApiKey ? 'opacity-50' : ''}`}></div>
           <div>
             <select
               value={chatbot.provider}
@@ -315,6 +390,11 @@ const ChatbotCard = ({
               ))}
             </select>
           </div>
+          {!hasApiKey && (
+            <div className="text-xs text-yellow-600 dark:text-yellow-400 bg-yellow-100 dark:bg-yellow-900 px-2 py-1 rounded">
+              No API Key
+            </div>
+          )}
         </div>
 
         <div className="flex items-center space-x-2">
@@ -400,13 +480,20 @@ const ChatbotCard = ({
               type="text"
               value={message}
               onChange={(e) => setMessage(e.target.value)}
-              placeholder="Type your message..."
-              className={`flex-1 px-3 py-2 rounded-lg border text-sm ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder-gray-400' : 'bg-white border-gray-300 placeholder-gray-500'}`}
+              placeholder={hasApiKey ? "Type your message..." : "Configure API key first..."}
+              disabled={!hasApiKey}
+              className={`flex-1 px-3 py-2 rounded-lg border text-sm ${
+                !hasApiKey 
+                  ? 'bg-gray-100 dark:bg-gray-800 text-gray-400 cursor-not-allowed'
+                  : darkMode 
+                    ? 'bg-gray-700 border-gray-600 text-white placeholder-gray-400' 
+                    : 'bg-white border-gray-300 placeholder-gray-500'
+              }`}
               onKeyPress={(e) => e.key === 'Enter' && handleSend()}
             />
             <button
               onClick={handleSend}
-              disabled={!message.trim() || chatbot.isLoading}
+              disabled={!message.trim() || chatbot.isLoading || !hasApiKey}
               className="px-4 py-2 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-400 text-white rounded-lg transition-colors"
             >
               <Send size={16} />
