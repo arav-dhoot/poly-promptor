@@ -29,9 +29,14 @@ const LLM_PROVIDERS = {
     models: ['command-a-03-2025', 'command-r-plus', 'command-r', 'embed-v4.0', 'rerank-v3.5'],
     color: 'bg-pink-500'
   },
-  groq: {
-    name: 'Groq',
-    models: ['grok-3', 'grok-3-mini', 'llama3-8b-8192', 'llama3-70b-8192', 'mixtral-8x7b-32768', 'gemma-7b-it'],
+  xai: {
+    name: 'xAI (Grok)',
+    models: ['grok-3', 'grok-3-mini'],
+    color: 'bg-gray-400'
+  },
+  groqcloud: {
+    name: 'GroqCloud (Open Models)',
+    models: ['llama3-8b-8192', 'llama3-70b-8192', 'mixtral-8x7b-32768', 'gemma-7b-it'],
     color: 'bg-indigo-500'
   }
 };
@@ -42,18 +47,20 @@ const MultiLLMChat = () => {
     {
       id: 1,
       provider: 'openai',
-      model: 'gpt-4',
+      model: LLM_PROVIDERS.openai.models[0],
       messages: [],
       isLoading: false,
-      systemPrompt: ''
+      systemPrompt: '',
+      isApiKeyInvalid: false
     },
     {
       id: 2,
       provider: 'anthropic',
-      model: 'claude-3-sonnet-20240229',
+      model: LLM_PROVIDERS.anthropic.models[0],
       messages: [],
       isLoading: false,
-      systemPrompt: ''
+      systemPrompt: '',
+      isApiKeyInvalid: false
     }
   ]);
   const [globalMessage, setGlobalMessage] = useState('');
@@ -91,13 +98,18 @@ const MultiLLMChat = () => {
   const addChatbot = () => {
     if (chatbots.length >= 8) return;
     
+    const allProviderKeys = Object.keys(LLM_PROVIDERS);
+    const usedProviderKeys = chatbots.map(cb => cb.provider);
+    let defaultProvider = allProviderKeys.find(pKey => !usedProviderKeys.includes(pKey)) || 'openai';
+
     const newChatbot = {
       id: nextId,
-      provider: 'openai',
-      model: 'gpt-4',
+      provider: defaultProvider,
+      model: LLM_PROVIDERS[defaultProvider].models[0],
       messages: [],
       isLoading: false,
-      systemPrompt: ''
+      systemPrompt: '',
+      isApiKeyInvalid: false
     };
     
     setChatbots([...chatbots, newChatbot]);
@@ -119,6 +131,11 @@ const MultiLLMChat = () => {
     setApiKeys(keys);
     setApiService(new APIService(keys));
     localStorage.setItem('llm-api-keys', JSON.stringify(keys));
+    setChatbots(prevChatbots => 
+      prevChatbots.map(bot => 
+        keys[bot.provider] ? { ...bot, isApiKeyInvalid: false } : bot
+      )
+    );
   };
 
   const sendMessage = async (chatbotId, message) => {
@@ -131,27 +148,27 @@ const MultiLLMChat = () => {
     if (!apiKeys[chatbot.provider]) {
       const errorMessage = { 
         role: 'assistant', 
-        content: `API key for ${LLM_PROVIDERS[chatbot.provider].name} is not configured. Please add your API key in the settings.`, 
-        timestamp: new Date() 
+        content: `API key for ${LLM_PROVIDERS[chatbot.provider].name} is not configured. Please add your API key in the settings.`,
+        timestamp: new Date()
       };
-      const userMessage = { role: 'user', content: message, timestamp: new Date() };
+      const userMessageObj = { role: 'user', content: message, timestamp: new Date() };
       updateChatbot(chatbotId, {
-        messages: [...chatbot.messages, userMessage, errorMessage]
+        messages: [...chatbot.messages, userMessageObj, errorMessage]
       });
       return;
     }
 
     // Add user message and set loading state
-    const userMessage = { role: 'user', content: message, timestamp: new Date() };
+    const userMessageObj = { role: 'user', content: message, timestamp: new Date() };
     updateChatbot(chatbotId, {
-      messages: [...chatbot.messages, userMessage],
+      messages: [...chatbot.messages, userMessageObj],
       isLoading: true
     });
 
     try {
       // Call the actual API
       const response = await apiService.callLLM(
-        [...chatbot.messages, userMessage],
+        [...chatbot.messages, userMessageObj],
         chatbot.provider,
         chatbot.model,
         chatbot.systemPrompt
@@ -164,20 +181,32 @@ const MultiLLMChat = () => {
       };
       
       updateChatbot(chatbotId, {
-        messages: [...chatbot.messages, userMessage, assistantMessage],
-        isLoading: false
+        messages: [...chatbot.messages, userMessageObj, assistantMessage],
+        isLoading: false,
+        isApiKeyInvalid: false
       });
     } catch (error) {
       console.error('API Error:', error);
+      let errorMessageContent = `Error: ${error.message}. Please check your API key and try again.`;
+      let apiKeyInvalid = false;
+      if (error.message.toLowerCase().includes('api key') || 
+          error.message.includes('401') || 
+          error.message.includes('403') || 
+          error.message.toLowerCase().includes('authentication')){
+        errorMessageContent = `API key for ${LLM_PROVIDERS[chatbot.provider].name} appears to be invalid or missing permissions. Please check your API key in settings.`;
+        apiKeyInvalid = true;
+      }
+
       const errorMessage = { 
         role: 'assistant', 
-        content: `Error: ${error.message}. Please check your API key and try again.`, 
+        content: errorMessageContent,
         timestamp: new Date() 
       };
       
       updateChatbot(chatbotId, {
-        messages: [...chatbot.messages, userMessage, errorMessage],
-        isLoading: false
+        messages: [...chatbot.messages, userMessageObj, errorMessage],
+        isLoading: false,
+        isApiKeyInvalid: apiKeyInvalid
       });
     }
   };
@@ -357,23 +386,48 @@ const ChatbotCard = ({
 }) => {
   const [message, setMessage] = useState('');
   const [showSettings, setShowSettings] = useState(false);
+  const chatContainerRef = useRef(null);
 
   const handleSend = () => {
-    if (!message.trim()) return;
+    if (!message.trim() || chatbot.isApiKeyInvalid) return;
     onSendMessage(message);
     setMessage('');
   };
+
+  useEffect(() => {
+    if (chatContainerRef.current) {
+      const { scrollHeight, scrollTop, clientHeight } = chatContainerRef.current;
+      if (chatbot.messages.length <= 2 || scrollHeight - scrollTop - clientHeight < 100) {
+         messagesEndRef.current[chatbot.id]?.scrollIntoView({ behavior: 'smooth' });
+      }
+    }
+  }, [chatbot.messages, chatbot.id, messagesEndRef, chatContainerRef]);
+
+  const isSendDisabled = !hasApiKey || chatbot.isApiKeyInvalid;
+  let placeholderText = "Type your message...";
+  if (!hasApiKey) {
+    placeholderText = "Configure API key first...";
+  } else if (chatbot.isApiKeyInvalid) {
+    placeholderText = "API Key is invalid. Check settings.";
+  }
 
   return (
     <div className={`rounded-lg border h-96 flex flex-col ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'} shadow-sm`}>
       {/* Header */}
       <div className={`flex items-center justify-between p-4 border-b ${darkMode ? 'border-gray-700' : 'border-gray-200'}`}>
         <div className="flex items-center space-x-3">
-          <div className={`w-3 h-3 rounded-full ${LLM_PROVIDERS[chatbot.provider]?.color || 'bg-gray-400'} ${!hasApiKey ? 'opacity-50' : ''}`}></div>
+          <div className={`w-3 h-3 rounded-full ${LLM_PROVIDERS[chatbot.provider]?.color || 'bg-gray-400'} ${isSendDisabled ? 'opacity-50' : ''}`}></div>
           <div>
             <select
               value={chatbot.provider}
-              onChange={(e) => onUpdate({ provider: e.target.value, model: LLM_PROVIDERS[e.target.value].models[0] })}
+              onChange={(e) => {
+                const newProvider = e.target.value;
+                onUpdate({ 
+                  provider: newProvider, 
+                  model: LLM_PROVIDERS[newProvider].models[0],
+                  isApiKeyInvalid: false
+                });
+              }}
               className={`font-medium ${darkMode ? 'bg-gray-800 text-white' : 'bg-white text-gray-900'} border-none text-sm`}
             >
               {Object.entries(LLM_PROVIDERS).map(([key, provider]) => (
@@ -390,9 +444,9 @@ const ChatbotCard = ({
               ))}
             </select>
           </div>
-          {!hasApiKey && (
+          {isSendDisabled && (
             <div className="text-xs text-yellow-600 dark:text-yellow-400 bg-yellow-100 dark:bg-yellow-900 px-2 py-1 rounded">
-              No API Key
+              {chatbot.isApiKeyInvalid ? 'Invalid API Key' : 'No API Key'}
             </div>
           )}
         </div>
@@ -434,17 +488,19 @@ const ChatbotCard = ({
       )}
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div ref={chatContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4">
         {chatbot.messages.map((msg, index) => (
           <div key={index} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
             <div className={`max-w-[80%] group relative`}>
-              <div className={`p-3 rounded-lg ${
-                msg.role === 'user' 
+              <div className={`p-3 rounded-lg ${ msg.content.startsWith('API key for') || msg.content.startsWith('Error:') || msg.content.startsWith('API Key for')
+                ? (darkMode ? 'bg-red-800 text-red-200' : 'bg-red-100 text-red-700') 
+                : msg.role === 'user' 
                   ? 'bg-blue-500 text-white' 
                   : darkMode 
                     ? 'bg-gray-700 text-white' 
                     : 'bg-gray-100 text-gray-900'
-              }`}>
+              }
+              `}>
                 <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
               </div>
               <button
@@ -480,11 +536,11 @@ const ChatbotCard = ({
               type="text"
               value={message}
               onChange={(e) => setMessage(e.target.value)}
-              placeholder={hasApiKey ? "Type your message..." : "Configure API key first..."}
-              disabled={!hasApiKey}
+              placeholder={placeholderText}
+              disabled={isSendDisabled}
               className={`flex-1 px-3 py-2 rounded-lg border text-sm ${
-                !hasApiKey 
-                  ? 'bg-gray-100 dark:bg-gray-800 text-gray-400 cursor-not-allowed'
+                isSendDisabled 
+                  ? 'bg-gray-100 dark:bg-gray-700 text-gray-400 dark:text-gray-500 cursor-not-allowed placeholder-gray-400 dark:placeholder-gray-500'
                   : darkMode 
                     ? 'bg-gray-700 border-gray-600 text-white placeholder-gray-400' 
                     : 'bg-white border-gray-300 placeholder-gray-500'
@@ -493,7 +549,7 @@ const ChatbotCard = ({
             />
             <button
               onClick={handleSend}
-              disabled={!message.trim() || chatbot.isLoading || !hasApiKey}
+              disabled={!message.trim() || chatbot.isLoading || isSendDisabled}
               className="px-4 py-2 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-400 text-white rounded-lg transition-colors"
             >
               <Send size={16} />
